@@ -42,12 +42,16 @@ export function addText(): void {
   }
 }
 
-/** 再生位置で分割する。選んでいるクリップがあればそれを、なければ再生位置にあるクリップすべてを分ける */
+/** 再生位置で分割する。選んでいるクリップがあればそれだけを、なければ再生位置にあるクリップすべてを分ける */
 export function splitAtPlayhead(): void {
   const s = useEditor.getState();
   const t = snapToFrame(s.currentTime);
   const sel = s.selectedClipId ? getClip(s.project, s.selectedClipId) : undefined;
-  const targets = sel && sel.start < t && clipEnd(sel) > t ? [sel] : clipsAt(s.project, t);
+  if (sel && !(sel.start < t && clipEnd(sel) > t)) {
+    showToast('選んでいるクリップの上に再生位置（白い線）を合わせてから分割してください');
+    return;
+  }
+  const targets = sel ? [sel] : clipsAt(s.project, t);
   if (targets.length === 0) {
     showToast('再生位置（白い線）をクリップの上に合わせてから分割してください');
     return;

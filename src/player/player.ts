@@ -2,7 +2,7 @@
 // 音の時計に映像を合わせる。
 import { getAudioContext } from '../media/audio';
 import { setPlaying, useEditor } from '../model/store';
-import { Asset, MediaClip, OUT_HEIGHT, OUT_WIDTH, projectDuration, snapToFrame } from '../model/types';
+import { Asset, FPS, MediaClip, OUT_HEIGHT, OUT_WIDTH, projectDuration, snapToFrame } from '../model/types';
 import { renderFrame } from '../render/compositor';
 
 export const PREVIEW_W = 1280;
@@ -298,8 +298,11 @@ class PlayerEngine {
       this.redrawRaf = 0;
       const s = useEditor.getState();
       if (s.playing) return; // 再生中は毎フレーム描いている
-      this.syncVideos(s.currentTime, false);
-      this.draw(s.currentTime);
+      // 最後まで再生したときは真っ黒にせず最後の場面を表示する
+      const dur = projectDuration(s.project);
+      const t = dur > 0 ? Math.min(s.currentTime, dur - 0.5 / FPS) : s.currentTime;
+      this.syncVideos(t, false);
+      this.draw(t);
     });
   }
 

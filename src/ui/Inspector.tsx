@@ -1,7 +1,37 @@
+import { useState } from 'react';
 import { deleteSelected } from '../model/actions';
 import { getClip, updateTextClip } from '../model/ops';
 import { commit, useEditor } from '../model/store';
 import { MediaClip, TextClip, formatTime } from '../model/types';
+
+/** 入力途中の数字（「1」→「14」→「140」など）も打てる数字欄 */
+function NumberField(props: {
+  value: number;
+  min: number;
+  max: number;
+  onChange: (v: number) => void;
+  label: string;
+  testId?: string;
+}) {
+  const { value, min, max, onChange, label, testId } = props;
+  const [draft, setDraft] = useState<string | null>(null);
+  return (
+    <input
+      type="number"
+      min={min}
+      max={max}
+      value={draft ?? String(value)}
+      onChange={(e) => {
+        setDraft(e.target.value);
+        const v = Number(e.target.value);
+        if (e.target.value !== '' && v >= min && v <= max) onChange(v);
+      }}
+      onBlur={() => setDraft(null)}
+      aria-label={label}
+      data-testid={testId}
+    />
+  );
+}
 
 function TextInspector({ clip }: { clip: TextClip }) {
   const update = (patch: Partial<TextClip>, key: string) =>
@@ -29,17 +59,13 @@ function TextInspector({ clip }: { clip: TextClip }) {
             onChange={(e) => update({ fontSize: Number(e.target.value) }, 'fontSize')}
             aria-label="文字の大きさ"
           />
-          <input
-            type="number"
+          <NumberField
+            value={clip.fontSize}
             min={8}
             max={600}
-            value={clip.fontSize}
-            onChange={(e) => {
-              const v = Number(e.target.value);
-              if (v >= 8 && v <= 600) update({ fontSize: v }, 'fontSize');
-            }}
-            aria-label="文字の大きさ（数字）"
-            data-testid="font-size"
+            onChange={(v) => update({ fontSize: v }, 'fontSize')}
+            label="文字の大きさ（数字）"
+            testId="font-size"
           />
         </div>
       </div>
