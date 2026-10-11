@@ -65,7 +65,8 @@ export function findFreeStart(others: Clip[], desired: number, duration: number)
   let bestDist = Infinity;
   for (const [a, b] of gaps) {
     if (b - a + EPS < duration) continue;
-    const cand = Math.min(Math.max(desired, a), b - duration);
+    // フレームにそろえてから隙間に収める（収めた後は丸めない＝重ならない）
+    const cand = Math.min(Math.max(snapToFrame(desired), a), b - duration);
     const dist = Math.abs(cand - desired);
     if (dist < bestDist) {
       bestDist = dist;
@@ -145,7 +146,7 @@ export function addAssetClip(
   }
   const duration = asset.kind === 'image' ? DEFAULT_IMAGE_DURATION : Math.max(MIN_CLIP, asset.duration);
   const desired = opts.at ?? trackEnd(project, track.id);
-  const start = snapToFrame(findFreeStart(clipsOnTrack(project, track.id), Math.max(0, desired), duration));
+  const start = findFreeStart(clipsOnTrack(project, track.id), Math.max(0, desired), duration);
   const clip: MediaClip = {
     id: newId('clip'),
     type: 'media',
@@ -178,7 +179,7 @@ export function addTextClip(p: Project, at: number): { project: Project; clip: T
     track = r.track;
   }
   const duration = 3;
-  const start = snapToFrame(findFreeStart(clipsOnTrack(project, track.id), Math.max(0, at), duration));
+  const start = findFreeStart(clipsOnTrack(project, track.id), Math.max(0, at), duration);
   const clip: TextClip = { id: newId('clip'), type: 'text', trackId: track.id, start, duration, ...DEFAULT_TEXT };
   return { project: { ...project, clips: [...project.clips, clip] }, clip };
 }
@@ -190,7 +191,7 @@ export function moveClip(p: Project, clipId: string, trackId: string, desiredSta
   if (!clip || !track) return p;
   const curTrack = getTrack(p, clip.trackId);
   if (!curTrack || curTrack.kind !== track.kind) trackId = clip.trackId;
-  const start = snapToFrame(findFreeStart(clipsOnTrack(p, trackId, clipId), Math.max(0, desiredStart), clip.duration));
+  const start = findFreeStart(clipsOnTrack(p, trackId, clipId), Math.max(0, desiredStart), clip.duration);
   if (start === clip.start && trackId === clip.trackId) return p;
   return replaceClip(p, { ...clip, trackId, start });
 }
@@ -200,15 +201,15 @@ export function trimClipStart(p: Project, clipId: string, newStart: number, asse
   const clip = getClip(p, clipId);
   if (!clip) return p;
   const end = clipEnd(clip);
-  const prev = clipsOnTrack(p, clip.trackId, clip.id).filter((c) => clipEnd(c) <= clip.start + EPS);
+  // 前のクリップ＝開始位置が自分より前のもの
+  const prev = clipsOnTrack(p, clip.trackId, clip.id).filter((c) => c.start < clip.start - EPS);
   const prevEnd = prev.length ? Math.max(...prev.map(clipEnd)) : 0;
-  let lo = prevEnd;
+  let lo = Math.min(prevEnd, clip.start);
   if (clip.type === 'media' && sourceDuration(clip, assets) !== Infinity) {
     lo = Math.max(lo, clip.start - clip.inPoint);
   }
-  const hi = end - MIN_CLIP;
-  let s = snapToFrame(Math.min(Math.max(newStart, lo), hi));
-  if (s < lo - EPS) s = lo;
+  const hi = Math.max(clip.start, end - MIN_CLIP);
+  const s = Math.min(Math.max(snapToFrame(newStart), lo), hi);
   const delta = s - clip.start;
   if (Math.abs(delta) < EPS) return p;
   const updated: Clip =
@@ -222,18 +223,16 @@ export function trimClipStart(p: Project, clipId: string, newStart: number, asse
 export function trimClipEnd(p: Project, clipId: string, newEnd: number, assets: AssetLookup): Project {
   const clip = getClip(p, clipId);
   if (!clip) return p;
-  const next = clipsOnTrack(p, clip.trackId, clip.id).filter((c) => c.start >= clipEnd(clip) - EPS);
+  // 次のクリップ＝開始位置が自分より後のもの
+  const next = clipsOnTrack(p, clip.trackId, clip.id).filter((c) => c.start > clip.start + EPS);
   const nextStart = next.length ? Math.min(...next.map((c) => c.start)) : Infinity;
-  let hi = nextStart;
+  let hi = Math.max(nextStart, clipEnd(clip));
   if (clip.type === 'media') {
     const src = sourceDuration(clip, assets);
     if (src !== Infinity) hi = Math.min(hi, clip.start + (src - clip.inPoint));
   }
-  const lo = clip.start + MIN_CLIP;
-  let e = Math.min(Math.max(newEnd, lo), hi);
-  const snapped = snapToFrame(e);
-  // フレームにそろえて上限を超える場合は上限のまま
-  e = snapped <= hi + EPS ? snapped : e;
+  const lo = Math.min(hi, clip.start + MIN_CLIP);
+  const e = Math.min(Math.max(snapToFrame(newEnd), lo), hi);
   const duration = e - clip.start;
   if (Math.abs(duration - clip.duration) < EPS) return p;
   return replaceClip(p, { ...clip, duration });

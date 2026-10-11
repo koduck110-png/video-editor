@@ -84,29 +84,32 @@ async function loadVideo(asset: Asset): Promise<Partial<Asset> | 'audio-only'> {
   el.playsInline = true;
   el.src = asset.url;
   try {
-    await waitEvent(el, 'loadeddata');
-  } catch {
-    throw new Error(`「${asset.name}」はこのブラウザで再生できない動画形式です`);
+    try {
+      await waitEvent(el, 'loadeddata');
+    } catch {
+      throw new Error(`「${asset.name}」はこのブラウザで再生できない動画形式です`);
+    }
+    let duration = el.duration;
+    if (!isFinite(duration) || duration <= 0) {
+      duration = (await mediabunnyDuration(asset.file)) ?? NaN;
+    }
+    if (!isFinite(duration) || duration <= 0) throw new Error(`「${asset.name}」の長さを読み取れませんでした`);
+    const width = el.videoWidth;
+    const height = el.videoHeight;
+    if (!width || !height) return 'audio-only';
+    // サムネイル用に少し先の場面を表示する
+    try {
+      el.currentTime = Math.min(1, duration * 0.1);
+      await waitEvent(el, 'seeked', 8000);
+    } catch {
+      /* サムネイルが作れなくても続ける */
+    }
+    const thumbnail = await makeThumbnail(el, width, height).catch(() => undefined);
+    return { duration, width, height, thumbnail };
+  } finally {
+    el.removeAttribute('src');
+    el.load();
   }
-  let duration = el.duration;
-  if (!isFinite(duration) || duration <= 0) {
-    duration = (await mediabunnyDuration(asset.file)) ?? NaN;
-  }
-  if (!isFinite(duration) || duration <= 0) throw new Error(`「${asset.name}」の長さを読み取れませんでした`);
-  const width = el.videoWidth;
-  const height = el.videoHeight;
-  if (!width || !height) return 'audio-only';
-  // サムネイル用に少し先の場面を表示する
-  try {
-    el.currentTime = Math.min(1, duration * 0.1);
-    await waitEvent(el, 'seeked', 8000);
-  } catch {
-    /* サムネイルが作れなくても続ける */
-  }
-  const thumbnail = await makeThumbnail(el, width, height).catch(() => undefined);
-  el.removeAttribute('src');
-  el.load();
-  return { duration, width, height, thumbnail };
 }
 
 async function loadImage(asset: Asset): Promise<Partial<Asset>> {
@@ -138,16 +141,24 @@ async function decodeAudioWithMediabunny(file: File): Promise<AudioBuffer | null
     const track = await input.getPrimaryAudioTrack();
     if (!track) return null;
     if (!(await track.canDecode())) return 'unsupported';
-    const sr = track.sampleRate;
     const channels = Math.max(1, track.numberOfChannels);
     const duration = await track.computeDuration();
     if (!isFinite(duration) || duration <= 0) return null;
-    const length = Math.ceil((duration + 0.05) * sr);
-    const out = new AudioBuffer({ length, numberOfChannels: channels, sampleRate: sr });
+    // 実際に取り出した音の細かさ（サンプルレート）に合わせて入れ物を作る
+    let sr = 0;
+    let length = 0;
+    let out: AudioBuffer | null = null;
     const sink = new AudioBufferSink(track);
     for await (const wb of sink.buffers()) {
       const b = wb.buffer;
-      let offset = Math.round(wb.timestamp * b.sampleRate * (sr / b.sampleRate));
+      if (!out) {
+        sr = b.sampleRate;
+        length = Math.ceil((duration + 0.05) * sr);
+        out = new AudioBuffer({ length, numberOfChannels: channels, sampleRate: sr });
+      } else if (b.sampleRate !== sr) {
+        return 'unsupported';
+      }
+      let offset = Math.round(wb.timestamp * sr);
       let srcStart = 0;
       if (offset < 0) {
         srcStart = -offset;

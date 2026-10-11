@@ -116,19 +116,18 @@ function frameTimesForClip(clip: MediaClip, firstTimestamp: number): number[] {
 
 async function openMediabunnyReader(clip: MediaClip, asset: Asset): Promise<ClipFrameReader> {
   const input = new Input({ formats: ALL_FORMATS, source: new BlobSource(asset.file) });
-  const track = await input.getPrimaryVideoTrack();
-  if (!track) {
+  let iter: AsyncGenerator<WrappedCanvas | null, void, unknown>;
+  try {
+    const track = await input.getPrimaryVideoTrack();
+    if (!track) throw new Error('no video track');
+    if (!(await track.canDecode())) throw new Error('cannot decode');
+    const firstTs = await track.getFirstTimestamp();
+    const sink = new CanvasSink(track, { poolSize: 3 });
+    iter = sink.canvasesAtTimestamps(frameTimesForClip(clip, firstTs));
+  } catch (e) {
     input.dispose();
-    throw new Error('no video track');
+    throw e;
   }
-  if (!(await track.canDecode())) {
-    input.dispose();
-    throw new Error('cannot decode');
-  }
-  const firstTs = await track.getFirstTimestamp();
-  const sink = new CanvasSink(track, { poolSize: 3 });
-  const times = frameTimesForClip(clip, firstTs);
-  const iter = sink.canvasesAtTimestamps(times);
   let last: WrappedCanvas | null = null;
   return {
     async next() {

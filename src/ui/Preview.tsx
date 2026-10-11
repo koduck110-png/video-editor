@@ -51,10 +51,12 @@ function TextBox({ clip, frame, selected }: { clip: TextClip; frame: HTMLDivElem
     const up = () => {
       window.removeEventListener('pointermove', move);
       window.removeEventListener('pointerup', up);
+      window.removeEventListener('pointercancel', up);
       if (started) endGesture();
     };
     window.addEventListener('pointermove', move);
     window.addEventListener('pointerup', up);
+    window.addEventListener('pointercancel', up);
   };
   return (
     <div

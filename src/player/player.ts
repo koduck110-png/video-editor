@@ -45,7 +45,8 @@ class PlayerEngine {
       }
       if (s.project !== prev.project || s.assets !== prev.assets) {
         this.cleanupVideos();
-        if (s.playing) this.restartFrom(this.now());
+        // 再生中の編集では時計はそのままにして、音だけ並べ直す
+        if (s.playing) this.rescheduleAudio();
         else this.requestRedraw();
       }
     });
@@ -191,9 +192,27 @@ class PlayerEngine {
       const node = ac.createBufferSource();
       node.buffer = buf;
       node.connect(dest);
+      node.onended = () => node.disconnect();
       node.start(when + Math.max(0, clip.start - t), offset, dur);
       this.audioNodes.push(node);
     }
+  }
+
+  /** 再生を止めずに音の予定を作り直す（古い音は新しい音が始まる瞬間に止める） */
+  private rescheduleAudio(): void {
+    if (!this.useAudioClock) return;
+    const ac = getAudioContext();
+    const when = Math.max(ac.currentTime + 0.03, this.startCtx);
+    const t = this.startT + (when - this.startCtx);
+    for (const n of this.audioNodes) {
+      try {
+        n.stop(when);
+      } catch {
+        /* 既に止まっている */
+      }
+    }
+    this.audioNodes = [];
+    this.scheduleAudio(t, when);
   }
 
   private stopAudio(): void {
