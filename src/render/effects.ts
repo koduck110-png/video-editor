@@ -172,6 +172,8 @@ function applyAnim(st: AnimState, type: AnimType, e: number, p: number): void {
 export function animState(clip: Clip, t: number): AnimState {
   const st = { ...NO_ANIM };
   const end = clipEnd(clip);
+  // 切り替え効果でクリップの外側が映るときは、端の状態のままにする
+  t = Math.min(Math.max(t, clip.start), end - 1e-6);
   if (clip.animIn && t >= clip.start - 1e-6) {
     const d = Math.min(clip.animIn.duration, clip.duration);
     if (d > 0 && t < clip.start + d) {

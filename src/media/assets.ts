@@ -1,9 +1,10 @@
 // 素材ファイルの読み込み。ファイルはブラウザの中だけで扱い、どこにも送らない。
 import { ALL_FORMATS, AudioBufferSink, BlobSource, Input } from 'mediabunny';
 import { Asset, AssetKind, newId } from '../model/types';
-import { patchAsset, showToast, upsertAsset } from '../model/store';
+import { getAsset, patchAsset, showToast, upsertAsset } from '../model/store';
 import { computePeaks, getAudioContext } from './audio';
-import { saveAssetRecord } from '../persist/db';
+import { deleteAssetRecord, saveAssetRecord } from '../persist/db';
+import { trackWrite } from '../persist/status';
 
 const VIDEO_EXT = ['mp4', 'm4v', 'mov', 'webm', 'mkv', 'ogv', 'avi', '3gp'];
 const IMAGE_EXT = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'avif', 'svg', 'ico'];
@@ -257,12 +258,13 @@ async function importOne(file: File, restoreId?: string): Promise<Asset | null> 
     showToast(`「${file.name}」は読み込めない種類のファイルです`, 'error');
     return null;
   }
+  const placeholder = restoreId ? getAsset(restoreId) : undefined;
   const asset: Asset = {
     id: restoreId ?? newId('asset'),
     name: file.name,
     kind,
     file,
-    url: URL.createObjectURL(file),
+    url: placeholder?.url ?? URL.createObjectURL(file),
     status: 'loading',
     duration: 0,
     width: 0,
@@ -270,7 +272,13 @@ async function importOne(file: File, restoreId?: string): Promise<Asset | null> 
   };
   upsertAsset(asset);
   // 次に開いたときのために、ブラウザの中に保存しておく
-  if (!restoreId) saveAssetRecord({ id: asset.id, name: asset.name, file }).catch((e) => console.warn('save asset failed', e));
+  if (!restoreId) void trackWrite(saveAssetRecord({ id: asset.id, name: asset.name, file })).catch(() => {});
+  // 読み込みの途中で素材が消された（新規プロジェクトなど）ときは、ここでやめる
+  const removed = () => {
+    if (getAsset(asset.id)) return false;
+    if (!restoreId) void deleteAssetRecord(asset.id).catch(() => {});
+    return true;
+  };
   try {
     let patch: Partial<Asset>;
     if (kind === 'video') {
@@ -286,11 +294,13 @@ async function importOne(file: File, restoreId?: string): Promise<Asset | null> 
     } else {
       patch = await loadAudioMeta(asset);
     }
+    if (removed()) return null;
     const ready: Asset = { ...asset, ...patch, kind, status: 'ready' };
     upsertAsset(ready);
     if (kind !== 'image') queueAudioDecode(ready);
     return ready;
   } catch (e) {
+    if (removed()) return null;
     const msg = e instanceof Error ? e.message : String(e);
     patchAsset(asset.id, { status: 'error', error: msg });
     showToast(msg, 'error');
@@ -310,8 +320,25 @@ export async function importFiles(files: File[]): Promise<Asset[]> {
 
 /** 保存しておいた素材を読み込み直す（id はそのまま） */
 export async function restoreAssets(records: { id: string; name: string; file: Blob }[]): Promise<void> {
-  for (const r of records) {
-    const file = r.file instanceof File ? r.file : new File([r.file], r.name, { type: r.file.type });
-    await importOne(file, r.id);
+  const files = records.map((r) => ({
+    id: r.id,
+    file: r.file instanceof File ? r.file : new File([r.file], r.name, { type: r.file.type }),
+  }));
+  // まず全部を「読み込み中」として並べておく（読み込みが終わるまで編集・書き出しで使わない）
+  for (const { id, file } of files) {
+    upsertAsset({
+      id,
+      name: file.name,
+      kind: detectKind(file) ?? 'video',
+      file,
+      url: URL.createObjectURL(file),
+      status: 'loading',
+      duration: 0,
+      width: 0,
+      height: 0,
+    });
+  }
+  for (const { id, file } of files) {
+    if (getAsset(id)) await importOne(file, id);
   }
 }

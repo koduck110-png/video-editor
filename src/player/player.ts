@@ -285,8 +285,8 @@ class PlayerEngine {
       if (t >= from) {
         const raw = sourceTimeAt(clip, t);
         const target = Math.min(maxSrc, Math.max(0, raw));
-        // 素材の外側（切り替え効果で延びた部分）は止めた絵を見せる
-        const frozen = raw < 0 || raw > maxSrc || t < clip.start || t >= clip.start + clip.duration;
+        // 素材の外側（切り替え効果で延びた部分で素材が足りないとき）は止めた絵を見せる
+        const frozen = raw < 0 || raw > maxSrc;
         if (playing && !frozen) {
           const diff = el.currentTime - target;
           const tol = 0.04 * Math.max(1, clip.speed);

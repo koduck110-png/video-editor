@@ -190,10 +190,20 @@ export function getAsset(id: string): Asset | undefined {
   return get().assets[id];
 }
 
+const usesAsset = (p: Project, id: string) => p.clips.some((c) => c.type === 'media' && c.assetId === id);
+
+/** 「元に戻す・やり直し」の履歴の中でその素材を使っているか */
+export function assetUsedInHistory(id: string): boolean {
+  const s = get();
+  return [...s.past, ...s.future, ...(s.gestureBase ? [s.gestureBase] : [])].some((p) => usesAsset(p, id));
+}
+
 /** 素材を一覧から消す（タイムラインで使っているときは消さない）。消したら true */
 export function removeAsset(id: string): boolean {
   const s = get();
-  if (s.project.clips.some((c) => c.type === 'media' && c.assetId === id)) return false;
+  if (usesAsset(s.project, id)) return false;
+  // 履歴に残っていると、元に戻したときに素材のないクリップができてしまうので履歴を消す
+  if (assetUsedInHistory(id)) set({ past: [], future: [], lastCoalesce: null });
   const a = s.assets[id];
   if (a) {
     URL.revokeObjectURL(a.url);

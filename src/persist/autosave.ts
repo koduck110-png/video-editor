@@ -3,25 +3,28 @@ import { restoreAssets } from '../media/assets';
 import { normalizeProject } from '../model/defaults';
 import { useEditor } from '../model/store';
 import { clearSaved, loadSaved, saveStateRecord } from './db';
+import { markDirty, trackWrite } from './status';
 
 let restoring = false;
 
 /** 編集するたびに少し待ってから保存する */
 export function startAutosave(): () => void {
   let timer: ReturnType<typeof setTimeout> | undefined;
+  let release: (() => void) | null = null;
   const save = () => {
     const s = useEditor.getState();
-    saveStateRecord({ project: s.project, assetOrder: s.assetOrder, savedAt: Date.now() })
-      .then(() => useEditor.setState({ saveState: 'saved' }))
-      .catch((e) => {
-        console.warn('autosave failed', e);
-        useEditor.setState({ saveState: 'error' });
-      });
+    const r = release;
+    release = null;
+    trackWrite(saveStateRecord({ project: s.project, assetOrder: s.assetOrder, savedAt: Date.now() }))
+      .catch(() => {})
+      .finally(() => r?.());
   };
   return useEditor.subscribe((s, prev) => {
     if (restoring) return;
     if (s.project === prev.project && s.assetOrder === prev.assetOrder) return;
-    if (s.saveState !== 'saving') useEditor.setState({ saveState: 'saving' });
+    markDirty();
+    // 保存を待っている間も「保存中」に数える
+    if (!release) void trackWrite(new Promise<void>((resolve) => (release = resolve)));
     clearTimeout(timer);
     timer = setTimeout(save, 700);
   });

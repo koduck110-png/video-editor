@@ -222,8 +222,15 @@ export async function exportProject(
   const audioCodec = await chooseAudioCodec();
   checkCancel();
 
-  // 音声の解析が終わっていない素材を待つ
+  // 素材がそろっているか確かめる
   const usedAssetIds = new Set(project.clips.flatMap((c) => (c.type === 'media' ? [c.assetId] : [])));
+  for (const id of usedAssetIds) {
+    const a = useEditor.getState().assets[id];
+    if (!a) throw new Error('素材が見つからないクリップがあります。そのクリップを削除してからもう一度お試しください。');
+    if (a.status === 'loading') throw new Error(`「${a.name}」を読み込み中です。少し待ってからもう一度お試しください。`);
+    if (a.status === 'error') throw new Error(`「${a.name}」を読み込めませんでした。そのクリップを削除してからもう一度お試しください。`);
+  }
+  // 音声の解析が終わっていない素材を待つ
   onProgress({ ratio: 0, message: '音声を準備しています…' });
   for (const id of usedAssetIds) await waitForAudio(id);
   checkCancel();

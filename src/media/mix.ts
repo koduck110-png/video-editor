@@ -9,12 +9,25 @@ export function clipHasSound(project: Project, clip: MediaClip, asset: Asset | u
   return kind === 'video' && asset.kind === 'video' && !clip.audioDetached;
 }
 
+/** クリップの長さに収まるように縮めたフェードの長さ */
+function fades(clip: MediaClip): { fi: number; fo: number } {
+  let fi = Math.max(0, clip.fadeIn);
+  let fo = Math.max(0, clip.fadeOut);
+  if (fi + fo > clip.duration && fi + fo > 0) {
+    const k = clip.duration / (fi + fo);
+    fi *= k;
+    fo *= k;
+  }
+  return { fi, fo };
+}
+
 /** 時間 tt での音量（フェードを含む） */
 function envelope(clip: MediaClip, tt: number): number {
   let v = clip.volume;
   const end = clip.start + clip.duration;
-  if (clip.fadeIn > 0) v *= Math.min(1, Math.max(0, (tt - clip.start) / clip.fadeIn));
-  if (clip.fadeOut > 0) v *= Math.min(1, Math.max(0, (end - tt) / clip.fadeOut));
+  const { fi, fo } = fades(clip);
+  if (fi > 0) v *= Math.min(1, Math.max(0, (tt - clip.start) / fi));
+  if (fo > 0) v *= Math.min(1, Math.max(0, (end - tt) / fo));
   return v;
 }
 
@@ -43,7 +56,8 @@ export function scheduleClipAudio(
   node.connect(gain);
   gain.connect(dest);
   // 音量の変化（フェード）を折れ線で予約する
-  const points = [startT, clip.start + clip.fadeIn, end - clip.fadeOut, end]
+  const { fi, fo } = fades(clip);
+  const points = [startT, clip.start + fi, end - fo, end]
     .filter((p) => p >= startT - 1e-6 && p <= end + 1e-6)
     .sort((a, b) => a - b);
   gain.gain.setValueAtTime(envelope(clip, startT), at(startT));

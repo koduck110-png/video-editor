@@ -84,7 +84,9 @@ function replaceClip(p: Project, clip: Clip): Project {
 export function sourceDuration(clip: Clip, assets: AssetLookup): number {
   if (clip.type !== 'media') return Infinity;
   const a = assets(clip.assetId);
-  if (!a || a.kind === 'image') return Infinity;
+  if (a?.kind === 'image') return Infinity;
+  // 読み込み中・見つからない素材は、今使っている範囲より長くできない
+  if (!a || a.status !== 'ready') return clip.inPoint + clip.duration * clip.speed;
   return a.duration;
 }
 
@@ -386,7 +388,8 @@ export function clipVisibleRange(p: Project, clip: Clip): [number, number] {
   const next = adjacentNext(p, clip);
   if (next) {
     const tout = effectiveTransition(p, next);
-    if (tout) to += tout.transition.duration / 2;
+    // 切り替えの範囲は後ろのクリップの開始位置が基準
+    if (tout) to = Math.max(to, next.start + tout.transition.duration / 2);
   }
   return [from, to];
 }

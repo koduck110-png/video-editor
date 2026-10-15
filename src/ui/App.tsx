@@ -93,20 +93,15 @@ export function App() {
 
   // 前回の作業を読み込み、そのあと自動保存を始める
   useEffect(() => {
-    let stop: (() => void) | null = null;
-    let cancelled = false;
+    // 読み込み中の編集も保存されるよう、先に自動保存を始めておく
+    const stop = startAutosave();
     void restoreLastSession().then((restored) => {
-      if (cancelled) return;
       if (restored && !toastShown) {
         toastShown = true;
         showToast('前回の作業を読み込みました');
       }
-      stop = startAutosave();
     });
-    return () => {
-      cancelled = true;
-      stop?.();
-    };
+    return () => stop();
   }, []);
 
   // 保存が終わる前にページを閉じようとしたら確認する

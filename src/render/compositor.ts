@@ -142,7 +142,10 @@ export function textFont(clip: TextClip): string {
 }
 
 interface TextLayout {
+  /** 描く文字（タイプのアニメーション中は途中まで） */
   lines: string[];
+  /** 全部表示したときの各行の幅 */
+  fullWidths: number[];
   maxW: number;
   lineH: number;
   totalH: number;
@@ -153,20 +156,26 @@ interface TextLayout {
 function layoutText(ctx: Ctx, clip: TextClip, reveal = 1): TextLayout {
   ctx.font = textFont(clip);
   ctx.letterSpacing = `${clip.letterSpacing}px`;
-  let text = clip.text;
+  // 大きさは全部表示したときで決める（タイプのアニメーション中に位置がずれないように）
+  const fullLines = clip.text.split('\n');
+  const fullWidths = fullLines.map((l) => ctx.measureText(l).width);
+  let lines = fullLines;
   if (reveal < 1) {
-    const chars = Array.from(text);
-    text = chars.slice(0, Math.floor(chars.length * reveal)).join('');
+    let remain = Math.floor(Array.from(clip.text.replace(/\n/g, '')).length * reveal);
+    lines = fullLines.map((l) => {
+      const chars = Array.from(l);
+      const part = chars.slice(0, Math.max(0, remain)).join('');
+      remain -= chars.length;
+      return part;
+    });
   }
-  const lines = text.split('\n');
-  let maxW = 0;
-  for (const line of lines) maxW = Math.max(maxW, ctx.measureText(line).width);
+  const maxW = Math.max(0, ...fullWidths);
   const lineH = clip.fontSize * clip.lineHeight;
-  const totalH = lineH * Math.max(1, clip.text.split('\n').length);
+  const totalH = lineH * Math.max(1, fullLines.length);
   const hasBg = clip.bgOpacity > 0;
   const padX = hasBg ? clip.fontSize * 0.4 : clip.strokeWidth;
   const padY = hasBg ? clip.fontSize * 0.2 : clip.strokeWidth;
-  return { lines, maxW, lineH, totalH, padX, padY };
+  return { lines, fullWidths, maxW, lineH, totalH, padX, padY };
 }
 
 let measureCtx: Ctx | null = null;
@@ -223,8 +232,10 @@ function drawText(ctx: Ctx, project: Project, clip: TextClip, t: number, fx: Lay
     ctx.roundRect(-L.maxW / 2 - L.padX, -L.totalH / 2 - L.padY, L.maxW + L.padX * 2, L.totalH + L.padY * 2, clip.fontSize * 0.18);
     ctx.fill();
   }
-  ctx.textAlign = clip.align;
-  const x = clip.align === 'left' ? -L.maxW / 2 : clip.align === 'right' ? L.maxW / 2 : 0;
+  // 各行の書き始めの位置（左揃えで描く。全部表示したときと同じ位置になる）
+  ctx.textAlign = 'left';
+  const lineX = (i: number) =>
+    clip.align === 'left' ? -L.maxW / 2 : clip.align === 'right' ? L.maxW / 2 - L.fullWidths[i] : -L.fullWidths[i] / 2;
   const top = -L.totalH / 2 + L.lineH / 2;
   const hasShadow = clip.shadowBlur > 0 || clip.shadowDistance > 0;
   const setShadow = (on: boolean) => {
@@ -241,20 +252,23 @@ function drawText(ctx: Ctx, project: Project, clip: TextClip, t: number, fx: Lay
       ctx.shadowOffsetY = 0;
     }
   };
-  let shadowUsed = false;
-  if (clip.strokeWidth > 0) {
-    setShadow(true);
-    shadowUsed = true;
-    ctx.lineJoin = 'round';
-    ctx.miterLimit = 2;
-    ctx.strokeStyle = clip.strokeColor;
-    // 線は文字の輪郭の内外半分ずつに引かれるので2倍にする
-    ctx.lineWidth = clip.strokeWidth * 2;
-    L.lines.forEach((line, i) => ctx.strokeText(line, x, top + i * L.lineH));
-  }
-  setShadow(!shadowUsed);
+  ctx.lineJoin = 'round';
+  ctx.miterLimit = 2;
+  ctx.strokeStyle = clip.strokeColor;
+  // 線は文字の輪郭の内外半分ずつに引かれるので2倍にする
+  ctx.lineWidth = clip.strokeWidth * 2;
   ctx.fillStyle = clip.color;
-  L.lines.forEach((line, i) => ctx.fillText(line, x, top + i * L.lineH));
+  const paint = () => {
+    if (clip.strokeWidth > 0) L.lines.forEach((line, i) => ctx.strokeText(line, lineX(i), top + i * L.lineH));
+    L.lines.forEach((line, i) => ctx.fillText(line, lineX(i), top + i * L.lineH));
+  };
+  if (hasShadow) {
+    // まず影だけのために一度描き、そのあと影なしで重ねる（縁取りと影が重なっても形がくずれない）
+    setShadow(true);
+    paint();
+    setShadow(false);
+  }
+  paint();
   ctx.restore();
 }
 

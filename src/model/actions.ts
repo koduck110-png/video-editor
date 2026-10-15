@@ -19,6 +19,7 @@ import {
   updateMediaClip,
 } from './ops';
 import {
+  assetUsedInHistory,
   commit,
   removeAsset,
   resetEditor,
@@ -225,6 +226,14 @@ export function applyFilter(filterId: string): void {
 // ---------- 素材・プロジェクト ----------
 
 export function deleteAsset(asset: Asset): void {
+  const s = useEditor.getState();
+  if (
+    !s.project.clips.some((c) => c.type === 'media' && c.assetId === asset.id) &&
+    assetUsedInHistory(asset.id) &&
+    !window.confirm('この素材を消すと「元に戻す」の履歴も消えます。消してもよいですか？')
+  ) {
+    return;
+  }
   if (!removeAsset(asset.id)) {
     showToast('タイムラインで使っている素材は削除できません。先にクリップを削除してください');
     return;
