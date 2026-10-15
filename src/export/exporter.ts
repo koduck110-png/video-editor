@@ -10,6 +10,8 @@ import {
   Mp4OutputFormat,
   Output,
   QUALITY_HIGH,
+  QUALITY_MEDIUM,
+  QUALITY_VERY_HIGH,
   canEncodeAudio,
   getFirstEncodableVideoCodec,
   type AudioCodec,
@@ -18,9 +20,12 @@ import {
 } from 'mediabunny';
 import { SAMPLE_RATE } from '../media/audio';
 import { waitForAudio } from '../media/assets';
-import { Asset, FPS, MediaClip, OUT_HEIGHT, OUT_WIDTH, Project, projectDuration } from '../model/types';
+import { clipHasSound, scheduleClipAudio } from '../media/mix';
+import { clipVisibleRange } from '../model/ops';
 import { useEditor } from '../model/store';
+import { Asset, MediaClip, Project, exportSize, projectDuration, sourceTimeAt } from '../model/types';
 import { renderFrame, VisualSource } from '../render/compositor';
+import { ensureFont } from '../render/fonts';
 
 export interface ExportProgress {
   /** 0〜1 */
@@ -32,6 +37,8 @@ export interface ExportResult {
   blob: Blob;
   videoCodec: VideoCodec;
   audioCodec: AudioCodec;
+  width: number;
+  height: number;
 }
 
 export class ExportCanceled extends Error {
@@ -68,18 +75,11 @@ async function chooseAudioCodec(): Promise<AudioCodec> {
 async function mixAudio(project: Project, assets: Record<string, Asset>, duration: number): Promise<AudioBuffer> {
   const length = Math.max(1, Math.ceil(duration * SAMPLE_RATE));
   const ctx = new OfflineAudioContext({ numberOfChannels: 2, length, sampleRate: SAMPLE_RATE });
-  const trackKinds = new Map(project.tracks.map((t) => [t.id, t.kind]));
   for (const clip of project.clips) {
     if (clip.type !== 'media') continue;
-    const kind = trackKinds.get(clip.trackId);
-    if (kind !== 'video' && kind !== 'audio') continue;
-    const buf = assets[clip.assetId]?.audioBuffer;
-    if (!buf) continue;
-    if (clip.inPoint >= buf.duration) continue;
-    const node = ctx.createBufferSource();
-    node.buffer = buf;
-    node.connect(ctx.destination);
-    node.start(clip.start, clip.inPoint, clip.duration);
+    const asset = assets[clip.assetId];
+    if (!clipHasSound(project, clip, asset)) continue;
+    scheduleClipAudio(ctx, ctx.destination, clip, asset.audioBuffer!, 0, 0);
   }
   return await ctx.startRendering();
 }
@@ -98,23 +98,22 @@ interface ClipFrameReader {
   dispose(): void;
 }
 
-function isActiveAt(clip: MediaClip, t: number): boolean {
-  return clip.start <= t + 1e-6 && t < clip.start + clip.duration - 1e-6;
+/** 書き出しのコマ f にそのクリップが画面に出ているか */
+function makeActivePredicate(project: Project, clip: MediaClip): (t: number) => boolean {
+  const [from, to] = clipVisibleRange(project, clip);
+  return (t) => from <= t + 1e-6 && t < to - 1e-6;
 }
 
-/** このクリップが表示されるフレームごとの、素材の中での時間 */
-function frameTimesForClip(clip: MediaClip, firstTimestamp: number): number[] {
-  const from = Math.max(0, Math.floor(clip.start * FPS) - 1);
-  const to = Math.ceil((clip.start + clip.duration) * FPS) + 1;
-  const times: number[] = [];
-  for (let f = from; f <= to; f++) {
-    const t = f / FPS;
-    if (isActiveAt(clip, t)) times.push(Math.max(firstTimestamp, clip.inPoint + (t - clip.start)));
-  }
-  return times;
+/** 素材の中での時間（範囲の外は端の絵で止める） */
+function clampedSourceTime(clip: MediaClip, t: number, firstTs: number, srcDur: number): number {
+  return Math.min(Math.max(firstTs, sourceTimeAt(clip, t)), Math.max(firstTs, srcDur - 0.001));
 }
 
-async function openMediabunnyReader(clip: MediaClip, asset: Asset): Promise<ClipFrameReader> {
+async function openMediabunnyReader(
+  clip: MediaClip,
+  asset: Asset,
+  frameTimes: number[],
+): Promise<ClipFrameReader> {
   const input = new Input({ formats: ALL_FORMATS, source: new BlobSource(asset.file) });
   let iter: AsyncGenerator<WrappedCanvas | null, void, unknown>;
   try {
@@ -123,7 +122,7 @@ async function openMediabunnyReader(clip: MediaClip, asset: Asset): Promise<Clip
     if (!(await track.canDecode())) throw new Error('cannot decode');
     const firstTs = await track.getFirstTimestamp();
     const sink = new CanvasSink(track, { poolSize: 3 });
-    iter = sink.canvasesAtTimestamps(frameTimesForClip(clip, firstTs));
+    iter = sink.canvasesAtTimestamps(frameTimes.map((t) => clampedSourceTime(clip, t, firstTs, asset.duration)));
   } catch (e) {
     input.dispose();
     throw e;
@@ -134,7 +133,7 @@ async function openMediabunnyReader(clip: MediaClip, asset: Asset): Promise<Clip
       const r = await iter.next();
       if (!r.done && r.value) last = r.value;
       if (!last) return null;
-      return { image: last.canvas, width: last.canvas.width, height: last.canvas.height };
+      return { image: last.canvas, width: last.canvas.width, height: last.canvas.height, opaque: true };
     },
     dispose() {
       iter.return(undefined).catch(() => {});
@@ -143,7 +142,7 @@ async function openMediabunnyReader(clip: MediaClip, asset: Asset): Promise<Clip
   };
 }
 
-/** 予備の方法: <video> 要素を1フレームずつ動かして取り出す（遅いが多くの形式で動く） */
+/** 予備の方法: <video> 要素を1コマずつ動かして取り出す（遅いが多くの形式で動く） */
 async function openElementReader(clip: MediaClip, asset: Asset): Promise<ClipFrameReader> {
   const el = document.createElement('video');
   el.muted = true;
@@ -155,7 +154,7 @@ async function openElementReader(clip: MediaClip, asset: Asset): Promise<ClipFra
   });
   return {
     async next(t: number) {
-      const target = clip.inPoint + (t - clip.start);
+      const target = clampedSourceTime(clip, t, 0, asset.duration);
       if (Math.abs(el.currentTime - target) > 0.0005) {
         await new Promise<void>((resolve) => {
           const timer = setTimeout(resolve, 3000);
@@ -170,13 +169,22 @@ async function openElementReader(clip: MediaClip, asset: Asset): Promise<ClipFra
           el.currentTime = target;
         });
       }
-      return { image: el, width: el.videoWidth, height: el.videoHeight };
+      return { image: el, width: el.videoWidth, height: el.videoHeight, opaque: true };
     },
     dispose() {
       el.removeAttribute('src');
       el.load();
     },
   };
+}
+
+/** 文字に使うフォントを先に読み込んでおく */
+async function prepareFonts(project: Project): Promise<void> {
+  const jobs: Promise<boolean>[] = [];
+  for (const c of project.clips) {
+    if (c.type === 'text' && c.text) jobs.push(ensureFont(c.fontFamily, c.bold, c.text));
+  }
+  await Promise.all(jobs);
 }
 
 export async function exportProject(
@@ -190,19 +198,27 @@ export async function exportProject(
   }
   const duration = projectDuration(project);
   if (duration <= 0) throw new Error('タイムラインが空です');
-  const totalFrames = Math.max(1, Math.ceil(duration * FPS - 1e-6));
+  const { width: outW, height: outH, scale } = exportSize(project.settings);
+  const fps = project.settings.export.fps;
+  const quality =
+    project.settings.export.quality === 'max'
+      ? QUALITY_VERY_HIGH
+      : project.settings.export.quality === 'standard'
+        ? QUALITY_MEDIUM
+        : QUALITY_HIGH;
+  const totalFrames = Math.max(1, Math.ceil(duration * fps - 1e-6));
   const checkCancel = () => {
     if (signal.aborted) throw new ExportCanceled();
   };
 
   onProgress({ ratio: 0, message: '準備しています…' });
-  const videoCodec = await getFirstEncodableVideoCodec(['avc', 'vp9', 'av1'], {
-    width: OUT_WIDTH,
-    height: OUT_HEIGHT,
-    quality: QUALITY_HIGH,
-    frameRate: FPS,
+  const videoCodec = await getFirstEncodableVideoCodec(['avc', 'vp9', 'av1', 'hevc'], {
+    width: outW,
+    height: outH,
+    quality,
+    frameRate: fps,
   });
-  if (!videoCodec) throw new Error('このブラウザでは 1920x1080 の映像を書き出せません');
+  if (!videoCodec) throw new Error(`このパソコンでは ${outW}×${outH} の映像を書き出せません。解像度を下げてください。`);
   const audioCodec = await chooseAudioCodec();
   checkCancel();
 
@@ -212,33 +228,44 @@ export async function exportProject(
   for (const id of usedAssetIds) await waitForAudio(id);
   checkCancel();
   const latestAssets = { ...assets, ...useEditor.getState().assets };
-  const mixed = await mixAudio(project, latestAssets, totalFrames / FPS);
+  const mixed = await mixAudio(project, latestAssets, totalFrames / fps);
+  checkCancel();
+  onProgress({ ratio: 0, message: 'フォントを準備しています…' });
+  await prepareFonts(project);
   checkCancel();
 
   const canvas = document.createElement('canvas');
-  canvas.width = OUT_WIDTH;
-  canvas.height = OUT_HEIGHT;
-  const ctx = canvas.getContext('2d', { alpha: false, willReadFrequently: false });
+  canvas.width = outW;
+  canvas.height = outH;
+  const ctx = canvas.getContext('2d', { alpha: false });
   if (!ctx) throw new Error('canvas が使えません');
 
   const target = new BufferTarget();
   const output = new Output({ format: new Mp4OutputFormat({ fastStart: 'in-memory' }), target });
-  const videoSource = new CanvasSource(canvas, { codec: videoCodec, quality: QUALITY_HIGH, keyFrameInterval: 2 });
+  const videoSource = new CanvasSource(canvas, { codec: videoCodec, quality, keyFrameInterval: 2 });
   const audioSource = new AudioBufferSource({ codec: audioCodec, quality: QUALITY_HIGH });
-  output.addVideoTrack(videoSource, { frameRate: FPS });
+  output.addVideoTrack(videoSource, { frameRate: fps });
   output.addAudioTrack(audioSource);
 
   const readers = new Map<string, ClipFrameReader>();
   const trackKinds = new Map(project.tracks.map((t) => [t.id, t.kind]));
-  const videoClips = project.clips.filter(
-    (c): c is MediaClip =>
-      c.type === 'media' && trackKinds.get(c.trackId) === 'video' && latestAssets[c.assetId]?.kind === 'video',
-  );
+  const videoClips = project.clips
+    .filter(
+      (c): c is MediaClip =>
+        c.type === 'media' && trackKinds.get(c.trackId) === 'video' && latestAssets[c.assetId]?.kind === 'video',
+    )
+    .map((clip) => {
+      const active = makeActivePredicate(project, clip);
+      const times: number[] = [];
+      for (let f = 0; f < totalFrames; f++) if (active(f / fps)) times.push(f / fps);
+      const last = times.length ? times[times.length - 1] : -1;
+      return { clip, active, times, last };
+    });
 
-  const openReader = async (clip: MediaClip): Promise<ClipFrameReader> => {
+  const openReader = async (clip: MediaClip, times: number[]): Promise<ClipFrameReader> => {
     const asset = latestAssets[clip.assetId];
     try {
-      return await openMediabunnyReader(clip, asset);
+      return await openMediabunnyReader(clip, asset, times);
     } catch (e) {
       console.warn('mediabunny reader failed, falling back to <video>', e);
       return await openElementReader(clip, asset);
@@ -252,7 +279,7 @@ export async function exportProject(
 
     for (let f = 0; f < totalFrames; f++) {
       checkCancel();
-      const t = f / FPS;
+      const t = f / fps;
 
       // 映像より少し先まで音声を入れておく（交互に入れるとメモリを使いすぎない）
       const audioUntil = Math.min(mixed.length, Math.ceil((t + 1) * SAMPLE_RATE));
@@ -264,31 +291,39 @@ export async function exportProject(
 
       // 必要な動画クリップの映像を取り出す
       const frames = new Map<string, VisualSource | null>();
-      for (const clip of videoClips) {
-        const end = clip.start + clip.duration;
-        const active = isActiveAt(clip, t);
-        let reader = readers.get(clip.id);
-        if (active) {
-          if (!reader) {
-            reader = await openReader(clip);
-            readers.set(clip.id, reader);
-          }
-          frames.set(clip.id, await reader.next(t));
-        } else if (reader && t >= end - 1e-6) {
-          reader.dispose();
-          readers.delete(clip.id);
+      const finished: string[] = [];
+      for (const v of videoClips) {
+        if (!v.active(t)) continue;
+        let reader = readers.get(v.clip.id);
+        if (!reader) {
+          reader = await openReader(v.clip, v.times);
+          readers.set(v.clip.id, reader);
         }
+        frames.set(v.clip.id, await reader.next(t));
+        if (Math.abs(t - v.last) < 1e-9) finished.push(v.clip.id);
       }
 
-      renderFrame(ctx, project, t, (clip) => {
-        const asset = latestAssets[clip.assetId];
-        if (!asset) return null;
-        if (asset.kind === 'image') {
-          return asset.image ? { image: asset.image, width: asset.image.width, height: asset.image.height } : null;
-        }
-        return frames.get(clip.id) ?? null;
-      });
-      await videoSource.add(t, 1 / FPS);
+      ctx.setTransform(scale, 0, 0, scale, 0, 0);
+      renderFrame(
+        ctx,
+        project,
+        t,
+        (clip) => {
+          const asset = latestAssets[clip.assetId];
+          if (!asset) return null;
+          if (asset.kind === 'image') {
+            return asset.image ? { image: asset.image, width: asset.image.width, height: asset.image.height } : null;
+          }
+          return frames.get(clip.id) ?? null;
+        },
+        scale,
+      );
+      await videoSource.add(t, 1 / fps);
+      // 最後のコマを使い終わったクリップは片付ける
+      for (const id of finished) {
+        readers.get(id)?.dispose();
+        readers.delete(id);
+      }
 
       if (f % 5 === 0 || f === totalFrames - 1) {
         onProgress({ ratio: (f + 1) / totalFrames, message: '書き出しています…' });
@@ -312,5 +347,5 @@ export async function exportProject(
 
   const buffer = target.buffer;
   if (!buffer) throw new Error('書き出しに失敗しました');
-  return { blob: new Blob([buffer], { type: 'video/mp4' }), videoCodec, audioCodec };
+  return { blob: new Blob([buffer], { type: 'video/mp4' }), videoCodec, audioCodec, width: outW, height: outH };
 }

@@ -1,12 +1,19 @@
 // プレビューの再生を担当する。映像は <video> 要素、音は Web Audio で鳴らし、
 // 音の時計に映像を合わせる。
 import { getAudioContext } from '../media/audio';
+import { clipHasSound, scheduleClipAudio } from '../media/mix';
+import { clipVisibleRange } from '../model/ops';
 import { setPlaying, useEditor } from '../model/store';
-import { Asset, FPS, MediaClip, OUT_HEIGHT, OUT_WIDTH, projectDuration, snapToFrame } from '../model/types';
+import { Asset, FPS, MediaClip, ProjectSettings, projectDuration, snapToFrame, sourceTimeAt } from '../model/types';
 import { renderFrame } from '../render/compositor';
 
-export const PREVIEW_W = 1280;
-export const PREVIEW_H = 720;
+/** プレビューの canvas の長い辺の画素数 */
+const PREVIEW_LONG_SIDE = 1280;
+
+export function previewSize(s: ProjectSettings): { width: number; height: number; k: number } {
+  const k = PREVIEW_LONG_SIDE / Math.max(s.width, s.height);
+  return { width: Math.round(s.width * k), height: Math.round(s.height * k), k };
+}
 
 interface VideoSlot {
   el: HTMLVideoElement;
@@ -17,6 +24,7 @@ interface VideoSlot {
 const MAX_IDLE_VIDEOS = 8;
 
 class PlayerEngine {
+  private canvas: HTMLCanvasElement | null = null;
   private ctx: CanvasRenderingContext2D | null = null;
   private videos = new Map<string, VideoSlot>();
   private audioNodes: AudioBufferSourceNode[] = [];
@@ -29,12 +37,13 @@ class PlayerEngine {
   private redrawRaf = 0;
   private selfUpdate = false;
   private unsub: (() => void) | null = null;
+  private k = 1;
 
   attach(canvas: HTMLCanvasElement): void {
     this.detach();
-    canvas.width = PREVIEW_W;
-    canvas.height = PREVIEW_H;
+    this.canvas = canvas;
     this.ctx = canvas.getContext('2d', { alpha: false });
+    this.resizeCanvas();
     this.unsub = useEditor.subscribe((s, prev) => {
       if (s.playing !== prev.playing) {
         if (s.playing) this.startPlayback();
@@ -44,6 +53,7 @@ class PlayerEngine {
         else this.requestRedraw();
       }
       if (s.project !== prev.project || s.assets !== prev.assets) {
+        if (s.project.settings !== prev.project.settings) this.resizeCanvas();
         this.cleanupVideos();
         // 再生中の編集では時計はそのままにして、音だけ並べ直す
         if (s.playing) this.rescheduleAudio();
@@ -58,9 +68,21 @@ class PlayerEngine {
     this.unsub = null;
     cancelAnimationFrame(this.raf);
     cancelAnimationFrame(this.redrawRaf);
+    this.redrawRaf = 0;
     this.stopAudio();
     for (const id of [...this.videos.keys()]) this.releaseVideo(id);
     this.ctx = null;
+    this.canvas = null;
+  }
+
+  private resizeCanvas(): void {
+    if (!this.canvas) return;
+    const size = previewSize(useEditor.getState().project.settings);
+    if (this.canvas.width !== size.width || this.canvas.height !== size.height) {
+      this.canvas.width = size.width;
+      this.canvas.height = size.height;
+    }
+    this.k = size.k;
   }
 
   /** 現在の再生位置（秒） */
@@ -132,7 +154,6 @@ class PlayerEngine {
     this.stopAudio();
     for (const v of this.videos.values()) {
       if (!v.el.paused) v.el.pause();
-      v.el.playbackRate = 1;
     }
     this.setTimeSilently(t);
     this.requestRedraw();
@@ -175,26 +196,12 @@ class PlayerEngine {
     const s = useEditor.getState();
     const ac = getAudioContext();
     const dest = this.getMaster();
-    const trackKinds = new Map(s.project.tracks.map((tr) => [tr.id, tr.kind]));
     for (const clip of s.project.clips) {
       if (clip.type !== 'media') continue;
-      const kind = trackKinds.get(clip.trackId);
-      if (kind !== 'video' && kind !== 'audio') continue;
       const asset = s.assets[clip.assetId];
-      const buf = asset?.audioBuffer;
-      if (!buf) continue;
-      const end = clip.start + clip.duration;
-      if (end <= t) continue;
-      const skip = Math.max(0, t - clip.start);
-      const offset = clip.inPoint + skip;
-      const dur = clip.duration - skip;
-      if (offset >= buf.duration || dur <= 0) continue;
-      const node = ac.createBufferSource();
-      node.buffer = buf;
-      node.connect(dest);
-      node.onended = () => node.disconnect();
-      node.start(when + Math.max(0, clip.start - t), offset, dur);
-      this.audioNodes.push(node);
+      if (!clipHasSound(s.project, clip, asset)) continue;
+      const node = scheduleClipAudio(ac, dest, clip, asset!.audioBuffer!, t, when);
+      if (node) this.audioNodes.push(node);
     }
   }
 
@@ -269,34 +276,42 @@ class PlayerEngine {
       if (clip.type !== 'media' || trackKinds.get(clip.trackId) !== 'video') continue;
       const asset = s.assets[clip.assetId];
       if (!asset || asset.kind !== 'video' || asset.status !== 'ready') continue;
-      const end = clip.start + clip.duration;
+      const [from, to] = clipVisibleRange(s.project, clip);
       const lookahead = playing ? 1.5 : 0;
-      if (t < clip.start - lookahead || t >= end) continue;
+      if (t < from - lookahead || t >= to) continue;
       used.add(clip.id);
       const el = this.getVideo(clip, asset);
-      if (t >= clip.start) {
-        const target = clip.inPoint + (t - clip.start);
-        if (playing) {
+      const maxSrc = Math.max(0, asset.duration - 0.04);
+      if (t >= from) {
+        const raw = sourceTimeAt(clip, t);
+        const target = Math.min(maxSrc, Math.max(0, raw));
+        // 素材の外側（切り替え効果で延びた部分）は止めた絵を見せる
+        const frozen = raw < 0 || raw > maxSrc || t < clip.start || t >= clip.start + clip.duration;
+        if (playing && !frozen) {
           const diff = el.currentTime - target;
+          const tol = 0.04 * Math.max(1, clip.speed);
           if (el.paused) {
             if (Math.abs(diff) > 0.05 && !el.seeking) el.currentTime = target;
-            el.playbackRate = 1;
+            el.playbackRate = clip.speed;
             el.play().catch(() => {});
-          } else if (Math.abs(diff) > 0.5) {
+          } else if (Math.abs(diff) > 0.5 * Math.max(1, clip.speed)) {
             el.currentTime = target;
-          } else if (Math.abs(diff) > 0.04) {
-            el.playbackRate = diff > 0 ? 0.92 : 1.08;
+          } else if (Math.abs(diff) > tol) {
+            el.playbackRate = clip.speed * (diff > 0 ? 0.92 : 1.08);
           } else {
-            el.playbackRate = 1;
+            el.playbackRate = clip.speed;
           }
         } else {
           if (!el.paused) el.pause();
-          if (Math.abs(el.currentTime - target) > 0.0005) el.currentTime = target;
+          if (Math.abs(el.currentTime - target) > (playing ? 0.05 : 0.0005) && !(playing && el.seeking)) {
+            el.currentTime = target;
+          }
         }
       } else {
         // もうすぐ始まるクリップは先に頭出ししておく
         if (!el.paused) el.pause();
-        if (Math.abs(el.currentTime - clip.inPoint) > 0.05 && !el.seeking) el.currentTime = clip.inPoint;
+        const first = Math.min(maxSrc, Math.max(0, sourceTimeAt(clip, from)));
+        if (Math.abs(el.currentTime - first) > 0.05 && !el.seeking) el.currentTime = first;
       }
     }
     const idle: [string, VideoSlot][] = [];
@@ -329,21 +344,28 @@ class PlayerEngine {
     const ctx = this.ctx;
     if (!ctx) return;
     const s = useEditor.getState();
-    ctx.setTransform(PREVIEW_W / OUT_WIDTH, 0, 0, PREVIEW_H / OUT_HEIGHT, 0, 0);
-    renderFrame(ctx, s.project, t, (clip) => {
-      const asset = s.assets[clip.assetId];
-      if (!asset || asset.status !== 'ready') return null;
-      if (asset.kind === 'image') {
-        return asset.image ? { image: asset.image, width: asset.image.width, height: asset.image.height } : null;
-      }
-      if (asset.kind === 'video') {
-        const slot = this.videos.get(clip.id);
-        if (slot && slot.el.readyState >= 2 && slot.el.videoWidth > 0) {
-          return { image: slot.el, width: slot.el.videoWidth, height: slot.el.videoHeight };
+    ctx.setTransform(this.k, 0, 0, this.k, 0, 0);
+    renderFrame(
+      ctx,
+      s.project,
+      t,
+      (clip) => {
+        const asset = s.assets[clip.assetId];
+        if (!asset || asset.status !== 'ready') return null;
+        if (asset.kind === 'image') {
+          return asset.image ? { image: asset.image, width: asset.image.width, height: asset.image.height } : null;
         }
-      }
-      return null;
-    });
+        if (asset.kind === 'video') {
+          const slot = this.videos.get(clip.id);
+          if (slot && slot.el.readyState >= 2 && slot.el.videoWidth > 0) {
+            return { image: slot.el, width: slot.el.videoWidth, height: slot.el.videoHeight, opaque: true };
+          }
+        }
+        return null;
+      },
+      this.k,
+      () => this.requestRedraw(),
+    );
   }
 }
 

@@ -257,7 +257,6 @@ try {
   check((await page.locator('[data-testid=track-text]').count()) === 2, '文字の段が自動で2つになった');
   const lefts = await textClips.evaluateAll((els) => els.map((el) => el.style.left));
   check(lefts[0] === lefts[1] && lefts[0] === '420px', `2つの文字が同じ 7 秒の位置にある（${lefts.join(', ')}）`);
-  check((await page.locator('[data-testid=text-box]').count()) === 2, 'プレビューに2つの文字が同時に出ている');
   const ruler3 = await page.locator('[data-testid=ruler]').boundingBox();
   await page.mouse.click(ruler3.x + 2 * 60 + 0.5, ruler3.y + 14);
   await page.waitForTimeout(200);

@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { ExportCanceled, ExportProgress, canExportInThisBrowser, exportProject } from '../export/exporter';
-import { setPlaying, useEditor } from '../model/store';
-import { formatTime, projectDuration } from '../model/types';
+import { commit, setPlaying, useEditor } from '../model/store';
+import { ExportSettings, exportSize, formatTime, projectDuration } from '../model/types';
 
 type Phase = 'confirm' | 'running' | 'done' | 'error';
 
@@ -27,6 +27,10 @@ export function ExportDialog({ onClose }: { onClose: () => void }) {
   const [startedAt, setStartedAt] = useState(0);
   const abortRef = useRef<AbortController | null>(null);
   const duration = useEditor((s) => projectDuration(s.project));
+  const settings = useEditor((s) => s.project.settings);
+  const size = exportSize(settings);
+  const setExport = (patch: Partial<ExportSettings>) =>
+    commit((p) => ({ ...p, settings: { ...p.settings, export: { ...p.settings.export, ...patch } } }));
 
   useEffect(() => {
     return () => {
@@ -89,8 +93,45 @@ export function ExportDialog({ onClose }: { onClose: () => void }) {
         {phase === 'confirm' && (
           <>
             <h2>動画を書き出す</h2>
+            <div className="export-settings">
+              <label>
+                解像度
+                <select
+                  value={settings.export.shortSide}
+                  onChange={(e) => setExport({ shortSide: Number(e.target.value) })}
+                  data-testid="export-resolution"
+                >
+                  <option value={720}>720p</option>
+                  <option value={1080}>1080p（おすすめ）</option>
+                  <option value={1440}>2K（1440p）</option>
+                  <option value={2160}>4K（2160p）</option>
+                </select>
+              </label>
+              <label>
+                コマ数
+                <select value={settings.export.fps} onChange={(e) => setExport({ fps: Number(e.target.value) })} data-testid="export-fps">
+                  {[24, 25, 30, 50, 60].map((f) => (
+                    <option key={f} value={f}>
+                      {f} コマ/秒
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                画質
+                <select
+                  value={settings.export.quality}
+                  onChange={(e) => setExport({ quality: e.target.value as ExportSettings['quality'] })}
+                  data-testid="export-quality"
+                >
+                  <option value="standard">標準（ファイルが小さい）</option>
+                  <option value="high">高画質</option>
+                  <option value="max">最高画質（ファイルが大きい）</option>
+                </select>
+              </label>
+            </div>
             <p>
-              1920×1080・30コマ/秒の MP4（音声付き）を作ります。
+              {size.width}×{size.height}・{settings.export.fps}コマ/秒の MP4（音声付き）を作ります。
               <br />
               長さ: {formatTime(duration)}
             </p>

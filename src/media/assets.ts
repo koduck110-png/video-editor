@@ -3,6 +3,7 @@ import { ALL_FORMATS, AudioBufferSink, BlobSource, Input } from 'mediabunny';
 import { Asset, AssetKind, newId } from '../model/types';
 import { patchAsset, showToast, upsertAsset } from '../model/store';
 import { computePeaks, getAudioContext } from './audio';
+import { saveAssetRecord } from '../persist/db';
 
 const VIDEO_EXT = ['mp4', 'm4v', 'mov', 'webm', 'mkv', 'ogv', 'avi', '3gp'];
 const IMAGE_EXT = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'avif', 'svg', 'ico'];
@@ -250,14 +251,14 @@ async function loadAudioMeta(asset: Asset): Promise<Partial<Asset>> {
   return { duration };
 }
 
-async function importOne(file: File): Promise<Asset | null> {
+async function importOne(file: File, restoreId?: string): Promise<Asset | null> {
   let kind = detectKind(file);
   if (!kind) {
     showToast(`「${file.name}」は読み込めない種類のファイルです`, 'error');
     return null;
   }
   const asset: Asset = {
-    id: newId('asset'),
+    id: restoreId ?? newId('asset'),
     name: file.name,
     kind,
     file,
@@ -268,6 +269,8 @@ async function importOne(file: File): Promise<Asset | null> {
     height: 0,
   };
   upsertAsset(asset);
+  // 次に開いたときのために、ブラウザの中に保存しておく
+  if (!restoreId) saveAssetRecord({ id: asset.id, name: asset.name, file }).catch((e) => console.warn('save asset failed', e));
   try {
     let patch: Partial<Asset>;
     if (kind === 'video') {
@@ -303,4 +306,12 @@ export async function importFiles(files: File[]): Promise<Asset[]> {
     if (a) out.push(a);
   }
   return out;
+}
+
+/** 保存しておいた素材を読み込み直す（id はそのまま） */
+export async function restoreAssets(records: { id: string; name: string; file: Blob }[]): Promise<void> {
+  for (const r of records) {
+    const file = r.file instanceof File ? r.file : new File([r.file], r.name, { type: r.file.type });
+    await importOne(file, r.id);
+  }
 }

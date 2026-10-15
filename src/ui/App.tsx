@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState } from 'react';
-import { deleteSelected, splitAtPlayhead } from '../model/actions';
-import { redo, selectClip, setCurrentTime, undo, useEditor } from '../model/store';
+import { copySelected, deleteSelected, duplicateSelected, pasteAtPlayhead, splitAtPlayhead } from '../model/actions';
+import { redo, selectClip, setCurrentTime, showToast, undo, useEditor } from '../model/store';
 import { FPS, snapToFrame } from '../model/types';
 import { importFiles } from '../media/assets';
+import { requestPersistentStorage, restoreLastSession, startAutosave } from '../persist/autosave';
 import { player } from '../player/player';
 import { ExportDialog } from './ExportDialog';
 import { Header } from './Header';
@@ -11,6 +12,8 @@ import { MediaPanel } from './MediaPanel';
 import { Preview } from './Preview';
 import { Timeline } from './Timeline';
 import { Toasts } from './Toasts';
+
+let toastShown = false;
 
 function isTyping(e: KeyboardEvent): boolean {
   const el = e.target as HTMLElement | null;
@@ -52,6 +55,15 @@ export function App() {
       } else if (ctrl && key === 'b') {
         e.preventDefault();
         splitAtPlayhead();
+      } else if (ctrl && key === 'c') {
+        e.preventDefault();
+        copySelected();
+      } else if (ctrl && key === 'v') {
+        e.preventDefault();
+        pasteAtPlayhead();
+      } else if (ctrl && key === 'd') {
+        e.preventDefault();
+        duplicateSelected();
       } else if (key === 'delete' || key === 'backspace') {
         e.preventDefault();
         deleteSelected();
@@ -79,10 +91,28 @@ export function App() {
     };
   }, [exporting]);
 
-  // 編集中にページを閉じようとしたら確認する
+  // 前回の作業を読み込み、そのあと自動保存を始める
+  useEffect(() => {
+    let stop: (() => void) | null = null;
+    let cancelled = false;
+    void restoreLastSession().then((restored) => {
+      if (cancelled) return;
+      if (restored && !toastShown) {
+        toastShown = true;
+        showToast('前回の作業を読み込みました');
+      }
+      stop = startAutosave();
+    });
+    return () => {
+      cancelled = true;
+      stop?.();
+    };
+  }, []);
+
+  // 保存が終わる前にページを閉じようとしたら確認する
   useEffect(() => {
     const onBeforeUnload = (e: BeforeUnloadEvent) => {
-      if (useEditor.getState().project.clips.length > 0) {
+      if (useEditor.getState().saveState === 'saving') {
         e.preventDefault();
         e.returnValue = '';
       }
@@ -115,7 +145,10 @@ export function App() {
     dragDepth.current = 0;
     setFileDrag(false);
     const files = Array.from(e.dataTransfer.files);
-    if (files.length) void importFiles(files);
+    if (files.length) {
+      requestPersistentStorage();
+      void importFiles(files);
+    }
   };
 
   const onSplitterDown = (e: React.PointerEvent) => {

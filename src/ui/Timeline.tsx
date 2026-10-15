@@ -3,11 +3,16 @@ import {
   addAssetToTimeline,
   addNewTrack,
   addText,
+  copySelected,
   deleteSelected,
   deleteTrack,
+  detachSelectedAudio,
+  duplicateSelected,
+  hasClipboard,
+  pasteAtPlayhead,
   splitAtPlayhead,
 } from '../model/actions';
-import { moveClip, trimClipEnd, trimClipStart } from '../model/ops';
+import { adjacentPrev, moveClip, trimClipEnd, trimClipStart } from '../model/ops';
 import {
   ZOOM_MAX,
   ZOOM_MIN,
@@ -16,11 +21,13 @@ import {
   endGesture,
   getAsset,
   selectClip,
+  selectTransition,
   setCurrentTime,
   setZoom,
   useEditor,
 } from '../model/store';
-import { Asset, Clip, PEAKS_PER_SEC, Track, clipEnd, projectDuration, snapToFrame } from '../model/types';
+import { Asset, Clip, PEAKS_PER_SEC, Track, TrackKind, clipEnd, projectDuration, snapToFrame } from '../model/types';
+import { TRANSITIONS } from '../render/effects';
 import { ASSET_DRAG_TYPE } from './MediaPanel';
 
 const RULER_H = 28;
@@ -105,6 +112,7 @@ function Ruler({
 function Waveform({ asset, clip, width, height }: { asset: Asset; clip: Clip; width: number; height: number }) {
   const ref = useRef<HTMLCanvasElement>(null);
   const inPoint = clip.type === 'media' ? clip.inPoint : 0;
+  const span = clip.type === 'media' ? clip.duration * clip.speed : clip.duration;
   useEffect(() => {
     const c = ref.current;
     const peaks = asset.peaks;
@@ -117,8 +125,8 @@ function Waveform({ asset, clip, width, height }: { asset: Asset; clip: Clip; wi
     ctx.fillStyle = 'rgba(255,255,255,0.55)';
     const mid = height / 2;
     for (let x = 0; x < w; x++) {
-      const t0 = inPoint + (x / w) * clip.duration;
-      const t1 = inPoint + ((x + 1) / w) * clip.duration;
+      const t0 = inPoint + (x / w) * span;
+      const t1 = inPoint + ((x + 1) / w) * span;
       let max = 0;
       for (let i = Math.floor(t0 * PEAKS_PER_SEC); i <= Math.floor(t1 * PEAKS_PER_SEC) && i < peaks.length; i++) {
         if (peaks[i] > max) max = peaks[i];
@@ -126,7 +134,7 @@ function Waveform({ asset, clip, width, height }: { asset: Asset; clip: Clip; wi
       const h = Math.max(1, max * (height - 6));
       ctx.fillRect(x, mid - h / 2, 1, h);
     }
-  }, [asset.peaks, inPoint, clip.duration, width, height]);
+  }, [asset.peaks, inPoint, span, width, height]);
   return <canvas ref={ref} className="clip-wave" />;
 }
 
@@ -134,32 +142,44 @@ type DragMode = 'move' | 'left' | 'right';
 
 interface ClipViewProps {
   clip: Clip;
+  trackKind: TrackKind;
   zoom: number;
   selected: boolean;
   dragging: boolean;
   onPointerDown: (e: React.PointerEvent, clip: Clip, mode: DragMode) => void;
+  onContextMenu: (e: React.MouseEvent, clip: Clip) => void;
 }
 
-const ClipView = memo(function ClipView({ clip, zoom, selected, dragging, onPointerDown }: ClipViewProps) {
+const ClipView = memo(function ClipView({ clip, trackKind, zoom, selected, dragging, onPointerDown, onContextMenu }: ClipViewProps) {
   const asset = useEditor((s) => (clip.type === 'media' ? s.assets[clip.assetId] : undefined));
   const left = clip.start * zoom;
   const width = Math.max(4, clip.duration * zoom);
-  const kindClass = clip.type === 'text' ? 'text' : asset?.kind === 'audio' ? 'audio' : 'video';
-  const label = clip.type === 'text' ? `T  ${clip.text.replace(/\n/g, ' ') || '（空の文字）'}` : asset?.name ?? '';
+  const kindClass = clip.type === 'text' ? 'text' : trackKind === 'audio' ? 'audio' : 'video';
+  const label =
+    clip.type === 'text' ? `T  ${clip.text.replace(/\n/g, ' ') || '（空の文字）'}` : asset ? asset.name : '（素材が見つかりません）';
+  const badges: string[] = [];
+  if (clip.type === 'media') {
+    if (clip.speed !== 1) badges.push(`${clip.speed}x`);
+    if (clip.filter.id !== 'none') badges.push('🎨');
+    if (clip.volume === 0 || clip.audioDetached) badges.push('🔇');
+  }
+  if (clip.animIn || clip.animOut) badges.push('✦');
   return (
     <div
       className={`clip ${kindClass}${selected ? ' selected' : ''}${dragging ? ' dragging' : ''}`}
       style={{ left, width }}
       onPointerDown={(e) => onPointerDown(e, clip, 'move')}
+      onContextMenu={(e) => onContextMenu(e, clip)}
       data-testid="clip"
       data-clip-id={clip.id}
       data-clip-type={kindClass}
     >
-      {asset?.thumbnail && asset.kind !== 'audio' && (
+      {asset?.thumbnail && kindClass === 'video' && (
         <div className="clip-thumbs" style={{ backgroundImage: `url(${asset.thumbnail})` }} />
       )}
-      {asset?.kind === 'audio' && asset.peaks && <Waveform asset={asset} clip={clip} width={width} height={44} />}
+      {kindClass === 'audio' && asset?.peaks && <Waveform asset={asset} clip={clip} width={width} height={44} />}
       <div className="clip-label">{label}</div>
+      {badges.length > 0 && <div className="clip-badges">{badges.join(' ')}</div>}
       <div
         className="clip-handle left"
         onPointerDown={(e) => {
@@ -209,6 +229,29 @@ export function Timeline() {
   const [snapX, setSnapX] = useState<number | null>(null);
   const [dropTrack, setDropTrack] = useState<string | null>(null);
   const zoomAnchor = useRef<{ time: number; px: number } | null>(null);
+  const [menu, setMenu] = useState<{ x: number; y: number; clip: Clip } | null>(null);
+  const selectedTrans = useEditor((s) => s.selectedTransitionClipId);
+
+  // 右クリックのメニューは、ほかの場所を押したら閉じる
+  useEffect(() => {
+    if (!menu) return;
+    const close = () => setMenu(null);
+    const onKey = (e: KeyboardEvent) => e.key === 'Escape' && close();
+    window.addEventListener('pointerdown', close);
+    window.addEventListener('keydown', onKey);
+    window.addEventListener('resize', close);
+    return () => {
+      window.removeEventListener('pointerdown', close);
+      window.removeEventListener('keydown', onKey);
+      window.removeEventListener('resize', close);
+    };
+  }, [menu]);
+
+  const onClipContextMenu = useCallback((e: React.MouseEvent, clip: Clip) => {
+    e.preventDefault();
+    selectClip(clip.id);
+    setMenu({ x: e.clientX, y: e.clientY, clip });
+  }, []);
 
   const duration = projectDuration(project);
   const contentWidth = Math.max(viewWidth, (duration + 30) * zoom);
@@ -427,7 +470,7 @@ export function Timeline() {
           🗑 削除
         </button>
         <span className="sep" />
-        <button onClick={addText} title="白い線の位置に文字を追加" data-testid="add-text">
+        <button onClick={() => addText()} title="白い線の位置に文字を追加" data-testid="add-text">
           T 文字を追加
         </button>
         <span className="sep" />
@@ -496,12 +539,35 @@ export function Timeline() {
                     <ClipView
                       key={c.id}
                       clip={c}
+                      trackKind={track.kind}
                       zoom={zoom}
                       selected={c.id === selectedId}
                       dragging={c.id === dragId}
                       onPointerDown={onClipPointerDown}
+                      onContextMenu={onClipContextMenu}
                     />
                   ))}
+                {track.kind === 'video' &&
+                  !dragId &&
+                  project.clips
+                    .filter((c) => c.trackId === track.id && adjacentPrev(project, c))
+                    .map((c) => {
+                      const tr = c.transitionIn;
+                      const icon = tr ? TRANSITIONS.find((x) => x.type === tr.type)?.icon ?? '⇄' : '⇄';
+                      return (
+                        <button
+                          key={`j-${c.id}`}
+                          className={`junction${tr ? ' has' : ''}${selectedTrans === c.id ? ' selected' : ''}`}
+                          style={{ left: c.start * zoom }}
+                          onPointerDown={(e) => e.stopPropagation()}
+                          onClick={() => selectTransition(c.id)}
+                          title={tr ? '切り替え効果（押して変更）' : '切り替え効果を付ける'}
+                          data-testid="junction"
+                        >
+                          {icon}
+                        </button>
+                      );
+                    })}
               </div>
             ))}
             <Playhead zoom={zoom} scrollRef={scrollRef} />
@@ -512,6 +578,37 @@ export function Timeline() {
           )}
         </div>
       </div>
+      {menu && (
+        <div
+          className="context-menu"
+          style={{ left: Math.min(menu.x, window.innerWidth - 200), top: Math.min(menu.y, window.innerHeight - 260) }}
+          onPointerDown={(e) => e.stopPropagation()}
+          data-testid="context-menu"
+        >
+          {[
+            { label: 'コピー（Ctrl+C）', run: copySelected },
+            { label: '貼り付け（Ctrl+V）', run: pasteAtPlayhead, disabled: !hasClipboard() },
+            { label: '複製（Ctrl+D）', run: duplicateSelected },
+            { label: '白い線で分割（Ctrl+B）', run: splitAtPlayhead },
+            ...(menu.clip.type === 'media' && project.tracks.find((t) => t.id === menu.clip.trackId)?.kind === 'video'
+              ? [{ label: '音声を分離', run: detachSelectedAudio }]
+              : []),
+            { label: '削除（Delete）', run: deleteSelected, danger: true },
+          ].map((it) => (
+            <button
+              key={it.label}
+              className={it.danger ? 'danger' : ''}
+              disabled={it.disabled}
+              onClick={() => {
+                setMenu(null);
+                it.run();
+              }}
+            >
+              {it.label}
+            </button>
+          ))}
+        </div>
+      )}
     </section>
   );
 }

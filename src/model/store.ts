@@ -30,6 +30,10 @@ interface EditorState {
   assetOrder: string[];
 
   toasts: Toast[];
+  /** 自動保存の状態 */
+  saveState: 'saved' | 'saving' | 'error';
+  /** 切り替え効果を選んでいるとき、その効果が付いている（後ろ側の）クリップ */
+  selectedTransitionClipId: string | null;
 }
 
 export const useEditor = create<EditorState>(() => ({
@@ -45,6 +49,8 @@ export const useEditor = create<EditorState>(() => ({
   assets: {},
   assetOrder: [],
   toasts: [],
+  saveState: 'saved',
+  selectedTransitionClipId: null,
 }));
 
 const get = useEditor.getState;
@@ -104,6 +110,7 @@ export function cancelGesture(): void {
 }
 
 function fixSelection(p: Project, sel: string | null): string | null {
+  // 元に戻したときに、なくなったクリップを選んだままにしない
   return sel && p.clips.some((c) => c.id === sel) ? sel : null;
 }
 
@@ -116,6 +123,7 @@ export function undo(): void {
     past: s.past.slice(0, -1),
     future: [s.project, ...s.future],
     selectedClipId: fixSelection(prev, s.selectedClipId),
+    selectedTransitionClipId: fixSelection(prev, s.selectedTransitionClipId),
     lastCoalesce: null,
   });
 }
@@ -129,12 +137,21 @@ export function redo(): void {
     past: [...s.past, s.project],
     future: s.future.slice(1),
     selectedClipId: fixSelection(next, s.selectedClipId),
+    selectedTransitionClipId: fixSelection(next, s.selectedTransitionClipId),
     lastCoalesce: null,
   });
 }
 
 export function selectClip(id: string | null): void {
-  if (get().selectedClipId !== id) set({ selectedClipId: id, lastCoalesce: null });
+  const s = get();
+  if (s.selectedClipId !== id || s.selectedTransitionClipId) {
+    set({ selectedClipId: id, selectedTransitionClipId: null, lastCoalesce: null });
+  }
+}
+
+/** 切り替え効果（clipId の前のつなぎ目）を選ぶ */
+export function selectTransition(clipId: string | null): void {
+  set({ selectedTransitionClipId: clipId, selectedClipId: null, lastCoalesce: null });
 }
 
 export function setCurrentTime(t: number): void {
@@ -171,6 +188,43 @@ export function patchAsset(id: string, patch: Partial<Asset>): void {
 
 export function getAsset(id: string): Asset | undefined {
   return get().assets[id];
+}
+
+/** 素材を一覧から消す（タイムラインで使っているときは消さない）。消したら true */
+export function removeAsset(id: string): boolean {
+  const s = get();
+  if (s.project.clips.some((c) => c.type === 'media' && c.assetId === id)) return false;
+  const a = s.assets[id];
+  if (a) {
+    URL.revokeObjectURL(a.url);
+    if (a.thumbnail) URL.revokeObjectURL(a.thumbnail);
+  }
+  const assets = { ...s.assets };
+  delete assets[id];
+  set({ assets, assetOrder: s.assetOrder.filter((x) => x !== id) });
+  return true;
+}
+
+/** すべてを最初の状態に戻す（新しいプロジェクト） */
+export function resetEditor(project: Project): void {
+  const s = get();
+  for (const a of Object.values(s.assets)) {
+    URL.revokeObjectURL(a.url);
+    if (a.thumbnail) URL.revokeObjectURL(a.thumbnail);
+  }
+  set({
+    project,
+    past: [],
+    future: [],
+    gestureBase: null,
+    lastCoalesce: null,
+    selectedClipId: null,
+    selectedTransitionClipId: null,
+    currentTime: 0,
+    playing: false,
+    assets: {},
+    assetOrder: [],
+  });
 }
 
 let toastSeq = 0;
