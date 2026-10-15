@@ -92,14 +92,28 @@ export function firstTrackOfKind(p: Project, kind: TrackKind): Track | undefined
   return p.tracks.find((t) => t.kind === kind);
 }
 
-/** 指定した種類のトラックを追加する。同じ種類のトラックのいちばん上に入れる */
+/**
+ * 指定した種類のトラックを追加する。
+ * 映像・文字は同じ種類のいちばん上（手前に表示される）、音声はいちばん下に入れる。
+ */
 export function addTrack(p: Project, kind: TrackKind): { project: Project; track: Track } {
-  const count = p.tracks.filter((t) => t.kind === kind).length;
   const label = kind === 'video' ? '映像' : kind === 'text' ? '文字' : '音声';
-  const track: Track = { id: newId('track'), kind, name: `${label} ${count + 1}` };
+  let maxNo = 0;
+  for (const t of p.tracks) {
+    if (t.kind !== kind) continue;
+    const m = t.name.match(/(\d+)$/);
+    maxNo = Math.max(maxNo, m ? Number(m[1]) : 1);
+  }
+  const track: Track = { id: newId('track'), kind, name: `${label} ${maxNo + 1}` };
   const tracks = [...p.tracks];
   const firstIdx = tracks.findIndex((t) => t.kind === kind);
-  if (firstIdx >= 0) {
+  if (firstIdx >= 0 && kind === 'audio') {
+    let lastIdx = firstIdx;
+    tracks.forEach((t, i) => {
+      if (t.kind === kind) lastIdx = i;
+    });
+    tracks.splice(lastIdx + 1, 0, track);
+  } else if (firstIdx >= 0) {
     tracks.splice(firstIdx, 0, track);
   } else {
     // 種類ごとの並び: 文字 → 映像 → 音声
@@ -126,9 +140,37 @@ export function removeTrack(p: Project, trackId: string): Project {
 
 const DEFAULT_IMAGE_DURATION = 5;
 
+/** そのトラックの start〜start+duration が空いているか */
+export function isRangeFree(p: Project, trackId: string, start: number, duration: number, excludeId?: string): boolean {
+  return clipsOnTrack(p, trackId, excludeId).every(
+    (c) => clipEnd(c) <= start + EPS || c.start >= start + duration - EPS,
+  );
+}
+
+/**
+ * 指定した時間が空いている同じ種類のトラックを探す（preferredId を優先）。
+ * どこも埋まっていれば、新しいトラックを作る。
+ */
+export function trackWithRoom(
+  p: Project,
+  kind: TrackKind,
+  start: number,
+  duration: number,
+  preferredId?: string,
+): { project: Project; track: Track } {
+  const sameKind = p.tracks.filter((t) => t.kind === kind);
+  const preferred = sameKind.find((t) => t.id === preferredId);
+  const ordered = preferred ? [preferred, ...sameKind.filter((t) => t !== preferred)] : sameKind;
+  for (const t of ordered) {
+    if (isRangeFree(p, t.id, start, duration)) return { project: p, track: t };
+  }
+  return addTrack(p, kind);
+}
+
 /**
  * 素材をタイムラインに追加する。
- * trackId / at を省略すると、合うトラックの最後に追加する。
+ * - at を指定: その時間に置く。そこが埋まっていれば別の段（なければ新しい段）に置く
+ * - at を省略: 動画・画像はいちばん下の映像トラックの最後につなげる
  */
 export function addAssetClip(
   p: Project,
@@ -136,17 +178,26 @@ export function addAssetClip(
   opts: { trackId?: string; at?: number } = {},
 ): { project: Project; clip: MediaClip } {
   const kind = trackKindForAsset(asset.kind);
+  const duration = asset.kind === 'image' ? DEFAULT_IMAGE_DURATION : Math.max(MIN_CLIP, asset.duration);
   let project = p;
-  let track = opts.trackId ? getTrack(p, opts.trackId) : undefined;
-  if (!track || track.kind !== kind) track = firstTrackOfKind(p, kind);
-  if (!track) {
-    const r = addTrack(p, kind);
+  let track: Track;
+  let start: number;
+  if (opts.at === undefined) {
+    const sameKind = p.tracks.filter((t) => t.kind === kind);
+    let main = sameKind[sameKind.length - 1];
+    if (!main) {
+      const r = addTrack(p, kind);
+      project = r.project;
+      main = r.track;
+    }
+    track = main;
+    start = findFreeStart(clipsOnTrack(project, track.id), trackEnd(project, track.id), duration);
+  } else {
+    start = snapToFrame(Math.max(0, opts.at));
+    const r = trackWithRoom(p, kind, start, duration, opts.trackId);
     project = r.project;
     track = r.track;
   }
-  const duration = asset.kind === 'image' ? DEFAULT_IMAGE_DURATION : Math.max(MIN_CLIP, asset.duration);
-  const desired = opts.at ?? trackEnd(project, track.id);
-  const start = findFreeStart(clipsOnTrack(project, track.id), Math.max(0, desired), duration);
   const clip: MediaClip = {
     id: newId('clip'),
     type: 'media',
@@ -170,16 +221,11 @@ export const DEFAULT_TEXT: Omit<TextClip, 'id' | 'trackId' | 'start' | 'duration
   y: 0.82,
 };
 
+/** 文字を指定した時間に追加する。そこが埋まっていれば別の段（なければ新しい段）に置く */
 export function addTextClip(p: Project, at: number): { project: Project; clip: TextClip } {
-  let project = p;
-  let track = firstTrackOfKind(p, 'text');
-  if (!track) {
-    const r = addTrack(p, 'text');
-    project = r.project;
-    track = r.track;
-  }
   const duration = 3;
-  const start = findFreeStart(clipsOnTrack(project, track.id), Math.max(0, at), duration);
+  const start = snapToFrame(Math.max(0, at));
+  const { project, track } = trackWithRoom(p, 'text', start, duration);
   const clip: TextClip = { id: newId('clip'), type: 'text', trackId: track.id, start, duration, ...DEFAULT_TEXT };
   return { project: { ...project, clips: [...project.clips, clip] }, clip };
 }

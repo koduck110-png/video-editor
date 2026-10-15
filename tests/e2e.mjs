@@ -202,6 +202,17 @@ try {
   await page.waitForTimeout(200);
   check((await page.locator('[data-testid=clip]').count()) === before, 'Delete キーで削除できた');
   check((await timeText()).includes('/ 00:10.0'), '削除後の長さが元に戻った');
+  // 動画がある時間（1 秒）に画像をドラッグ → 新しい映像の段ができて、同じ時間に置ける
+  await page.locator('[data-testid=media-item]').nth(3).dragTo(page.locator('[data-testid=track-video]').first(), {
+    targetPosition: { x: 1 * 60, y: videoRow.height / 2 },
+  });
+  await page.waitForTimeout(200);
+  check((await page.locator('[data-testid=track-video]').count()) === 2, '埋まっている時間に置くと映像の段が自動で増えた');
+  const overlay = page.locator('[data-clip-id].selected');
+  check((await overlay.evaluate((el) => el.style.left)) === '60px', '置いた画像は 1 秒の位置のまま');
+  await page.keyboard.press('Delete');
+  await page.waitForTimeout(200);
+  check((await page.locator('[data-testid=clip]').count()) === before, '重ねた画像を削除できた');
 
   console.log('9. 文字入れ（7 秒の位置、画像の上）');
   const ruler2 = await page.locator('[data-testid=ruler]').boundingBox();
@@ -236,6 +247,26 @@ try {
   // プレビューに黄色い文字が描かれているか
   const yellow = await countYellow();
   check(yellow > yellowBefore + 1000, `プレビューの文字が黄色になった（黄色の画素 ${yellowBefore} → ${yellow}）`);
+
+  console.log('9b. 同じ時間に2つめの文字・2つめの音楽');
+  await page.locator('[data-testid=add-text]').click();
+  await page.locator('[data-testid=text-input]').fill('2つめの文字');
+  await page.waitForTimeout(200);
+  const textClips = page.locator('[data-clip-type=text]');
+  check((await textClips.count()) === 2, '文字クリップが2つになった');
+  check((await page.locator('[data-testid=track-text]').count()) === 2, '文字の段が自動で2つになった');
+  const lefts = await textClips.evaluateAll((els) => els.map((el) => el.style.left));
+  check(lefts[0] === lefts[1] && lefts[0] === '420px', `2つの文字が同じ 7 秒の位置にある（${lefts.join(', ')}）`);
+  check((await page.locator('[data-testid=text-box]').count()) === 2, 'プレビューに2つの文字が同時に出ている');
+  const ruler3 = await page.locator('[data-testid=ruler]').boundingBox();
+  await page.mouse.click(ruler3.x + 2 * 60 + 0.5, ruler3.y + 14);
+  await page.waitForTimeout(200);
+  await page.locator('[data-testid=media-add]').nth(2).click();
+  await page.waitForTimeout(200);
+  check((await page.locator('[data-testid=track-audio]').count()) === 2, '音声の段が自動で2つになった');
+  const audioLefts = await page.locator('[data-clip-type=audio]').evaluateAll((els) => els.map((el) => el.style.left).sort());
+  check(audioLefts.join(',') === '120px,60px', `音楽が 1 秒と 2 秒に重ねて置けた（${audioLefts.join(', ')}）`);
+  check((await timeText()).includes('/ 00:10.0'), '全体の長さは 10 秒のまま');
   await page.screenshot({ path: join(outDir, '02-edited.png') });
 
   console.log('10. 再生・一時停止');
@@ -312,6 +343,14 @@ try {
   let ycount = 0;
   for (let i = 0; i < raw8.length; i += 3) if (raw8[i] > 220 && raw8[i + 1] > 215 && raw8[i + 2] < 90) ycount++;
   check(ycount > 3000, `8 秒目に黄色い文字が入っている（${ycount} 画素）`);
+  let wcount = 0;
+  for (let y = 810; y < 970; y++) {
+    for (let x = 0; x < 1920; x++) {
+      const i = (y * 1920 + x) * 3;
+      if (raw8[i] > 235 && raw8[i + 1] > 235 && raw8[i + 2] > 235) wcount++;
+    }
+  }
+  check(wcount > 2000, `8 秒目に2つめの白い文字も同時に入っている（${wcount} 画素）`);
   // 3 秒の場面: 動画（真っ黒ではない）、文字はまだない
   const raw3 = frameAt(3);
   let bright = 0;

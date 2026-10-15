@@ -267,6 +267,27 @@ export function Timeline() {
     return () => el.removeEventListener('wheel', onWheel);
   }, [changeZoom]);
 
+  // 新しく追加して選んだクリップが見えていなければ、見える位置までスクロールする
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el || !selectedId) return;
+    const s = useEditor.getState();
+    const clip = s.project.clips.find((c) => c.id === selectedId);
+    if (!clip) return;
+    const x0 = clip.start * s.zoom;
+    const x1 = clipEnd(clip) * s.zoom;
+    if (x1 < el.scrollLeft + 20 || x0 > el.scrollLeft + el.clientWidth - 20) {
+      el.scrollLeft = Math.max(0, x0 - 40);
+    }
+    const row = contentRef.current?.querySelector<HTMLElement>(`[data-track-id="${clip.trackId}"]`);
+    if (row) {
+      const top = row.offsetTop - RULER_H;
+      const bottom = row.offsetTop + row.offsetHeight;
+      if (top < el.scrollTop) el.scrollTop = top;
+      else if (bottom > el.scrollTop + el.clientHeight) el.scrollTop = bottom - el.clientHeight;
+    }
+  }, [selectedId]);
+
   const timeFromClientX = (clientX: number): number => {
     const rect = contentRef.current!.getBoundingClientRect();
     return Math.max(0, (clientX - rect.left) / useEditor.getState().zoom);

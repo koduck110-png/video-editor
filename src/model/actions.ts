@@ -10,12 +10,18 @@ import {
   splitClip,
 } from './ops';
 import { commit, getAsset, selectClip, setCurrentTime, showToast, useEditor } from './store';
-import { Asset, TrackKind, clipEnd, snapToFrame } from './types';
+import { Asset, TrackKind, clipEnd, projectDuration, snapToFrame } from './types';
 
 export function addAssetToTimeline(asset: Asset, opts: { trackId?: string; at?: number } = {}): void {
   if (asset.status !== 'ready') {
     showToast('まだ読み込み中です。少し待ってからもう一度お試しください');
     return;
+  }
+  // 音楽の「＋追加」は再生位置（白い線）に置く。白い線がいちばん最後にあるときは先頭に置く
+  if (asset.kind === 'audio' && opts.at === undefined) {
+    const s = useEditor.getState();
+    const end = projectDuration(s.project);
+    opts = { ...opts, at: s.currentTime >= end - 1e-3 ? 0 : s.currentTime };
   }
   let newId: string | null = null;
   commit((p) => {

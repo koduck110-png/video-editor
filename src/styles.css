@@ -437,6 +437,19 @@ input[type='color'] {
   border-right: 1px solid var(--line);
   overflow: hidden;
   background: var(--panel);
+  position: relative;
+}
+/* 目盛りの横は空けておく（縦にスクロールしたとき段の名前が重ならないように） */
+.track-headers::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 28px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--line);
+  z-index: 1;
 }
 .track-headers-inner {
   padding-top: 28px;
